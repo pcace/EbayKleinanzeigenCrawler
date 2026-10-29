@@ -14,6 +14,10 @@ namespace EbayKleinanzeigenCrawler.Query;
 
 public class QueryExecutor : IQueryExecutor
 {
+    private static readonly HttpClient Client = new(new HttpClientHandler
+    {
+        AutomaticDecompression = System.Net.DecompressionMethods.All
+    });
     private TimeSpan _timeToWaitBetweenMaxAmountOfRequests;
     private uint _allowedRequestsPerTimespan;
 
@@ -53,6 +57,7 @@ public class QueryExecutor : IQueryExecutor
             else
             {
                 _logger.Debug("First try failed. Trying one more time.");
+                await Task.Delay(TimeSpan.FromSeconds(5));
                 var secondTry = await TryHttpRequest(url);
                 if (secondTry is not null)
                 {
@@ -74,15 +79,10 @@ public class QueryExecutor : IQueryExecutor
     private async Task<HtmlDocument> TryHttpRequest(Uri url)
     {
         _queryCounter.WaitForAcquiringPermissionForQuery(_timeToWaitBetweenMaxAmountOfRequests, _allowedRequestsPerTimespan, acquire: true);
-        var httpClient = new HttpClient(new HttpClientHandler
-        {
-            AutomaticDecompression = System.Net.DecompressionMethods.All
-        });
-
         using var requestMessage = new HttpRequestMessage(HttpMethod.Get, url);
         var userAgent = _userAgentProvider.GetRandomUserAgent();
         requestMessage.Headers.Add("user-agent", userAgent);
-        var response = await httpClient.SendAsync(requestMessage);
+        using var response = await Client.SendAsync(requestMessage);
 
         var htmlDocument = new HtmlDocument();
         var html = await response.Content.ReadAsStringAsync();
