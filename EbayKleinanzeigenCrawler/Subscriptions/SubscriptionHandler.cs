@@ -88,7 +88,11 @@ public class SubscriptionHandler
         {
             if (subscription.FirstRunCompleted || subscription.InitialPull)
             {
-                await CheckForMatchAsync(parser, subscription, newResult);
+                if (!await CheckForMatchAsync(parser, subscription, newResult))
+                {
+                    _logger.Warning("Keeping {Link} pending because its detail page could not be checked", newResult.Link);
+                    continue;
+                }
             }
             
             alreadyProcessedLinks.Add(new AlreadyProcessedUrl
@@ -124,7 +128,7 @@ public class SubscriptionHandler
         {
             var page = pages.ElementAt(i);
 
-            var pageHtml = await parser.QueryExecutor.GetHtml(page);
+            var pageHtml = i == 0 ? firstPageHtml : await parser.QueryExecutor.GetHtml(page);
             if (pageHtml is null)
             {
                 continue;
@@ -168,12 +172,12 @@ public class SubscriptionHandler
         }
     }
 
-    private async Task CheckForMatchAsync(IParser parser, Subscription subscription, Result result)
+    private async Task<bool> CheckForMatchAsync(IParser parser, Subscription subscription, Result result)
     {
         var htmlDocument = await parser.QueryExecutor.GetHtml(result.Link);
         if (htmlDocument is null)
         {
-            return;
+            return false;
         }
             
         bool isMatch;
@@ -184,7 +188,7 @@ public class SubscriptionHandler
         catch (Exception e)
         {
             _logger.Error(e, "Skipping this link");
-            return;
+            return false;
         }
 
         if (isMatch)
@@ -196,5 +200,6 @@ public class SubscriptionHandler
         {
             _logger.Debug($"No match: {result.Link}");
         }
+        return true;
     }
 }

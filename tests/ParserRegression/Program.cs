@@ -1,6 +1,9 @@
 using EbayKleinanzeigenCrawler.ErrorHandling;
 using EbayKleinanzeigenCrawler.Interfaces;
+using EbayKleinanzeigenCrawler.Models;
 using EbayKleinanzeigenCrawler.Parser.Implementations;
+using EbayKleinanzeigenCrawler.Subscriptions;
+using System.Reflection;
 using HtmlAgilityPack;
 using Serilog;
 
@@ -57,6 +60,30 @@ if (args.Length > 0)
     Check(results.All(r => r.Link.Host == "www.kleinanzeigen.de"), "Live ad URLs stay on the expected origin");
     Console.WriteLine($"LIVE: {results.Count} ads, {parser.GetAdditionalPages(live).Count} additional pages");
 }
+// A failed detail request must not consume a new ad; the next cycle can retry it.
+var query = new DetailQuery(modern);
+var memory = new MemoryUrls();
+var notifications = new RecordingNotifications();
+var logger = new LoggerConfiguration().CreateLogger();
+var handler = new SubscriptionHandler(notifications, null, logger, null, memory, new NoErrors());
+var subscription = new Subscription
+{
+    QueryUrl = new Uri("https://www.kleinanzeigen.de/s-test/k0"),
+    FirstRunCompleted = true,
+    IncludeKeywords = new List<string>(),
+    ExcludeKeywords = new List<string>()
+};
+var liveParser = new EbayKleinanzeigenParser(logger, query, new NoErrors());
+var process = typeof(SubscriptionHandler).GetMethod("ProcessSubscriptionAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+async Task Cycle() => await (Task)process.Invoke(handler, new object[] { subscription, liveParser })!;
+await Cycle();
+Check(memory.Urls.Count == 0 && notifications.Sent == 0, "Unavailable detail page remains pending for the next cycle");
+Check(query.SearchRequests == 1, "First search page is fetched once per cycle");
+query.DetailAvailable = true;
+await Cycle();
+Check(memory.Urls.Count == 1 && notifications.Sent == 1, "Recovered detail page is checked and notified once");
+await Cycle();
+Check(memory.Urls.Count == 1 && notifications.Sent == 1, "A successful retry does not create duplicate notifications");
 Console.WriteLine($"{checks} regression checks passed.");
 
 sealed class InspectableParser : EbayKleinanzeigenParser
@@ -74,4 +101,40 @@ sealed class NoErrors : IErrorStatistics
 {
     public void AmendErrorStatistic(ErrorType type) => throw new Exception("Unexpected parser error: " + type);
     public void NotifyOnThreshold() { }
+}
+
+sealed class DetailQuery(HtmlDocument search) : IQueryExecutor
+{
+    public bool DetailAvailable { get; set; }
+    public int SearchRequests { get; private set; }
+    public void Initialize(TimeSpan interval, uint count, string invalidHtml) { }
+    public bool WaitUntilQueriesArePossibleAgain() => true;
+    public Task<HtmlDocument> GetHtml(Uri uri)
+    {
+        if (!uri.AbsolutePath.StartsWith("/s-anzeige/"))
+        {
+            SearchRequests++;
+            return Task.FromResult(search);
+        }
+        if (!DetailAvailable) return Task.FromResult<HtmlDocument>(null);
+        var detail = new HtmlDocument();
+        detail.LoadHtml("<h1 id='viewad-title'>Example</h1><p id='viewad-description-text'>A real description</p>");
+        return Task.FromResult(detail);
+    }
+}
+
+sealed class MemoryUrls : IAlreadyProcessedUrlsPersistence
+{
+    public List<AlreadyProcessedUrl> Urls { get; private set; } = new();
+    public void AddOrUpdate(Guid key, List<AlreadyProcessedUrl> data) => Urls = data;
+    public List<AlreadyProcessedUrl> GetAlreadyProcessedLinksForSubscription(Guid id) => Urls;
+    public void RestoreData() { }
+    public void PersistData() { }
+}
+
+sealed class RecordingNotifications : IOutgoingNotifications
+{
+    public int Sent { get; private set; }
+    public Task NotifySubscribers(Subscription subscription, Result result) { Sent++; return Task.CompletedTask; }
+    public Task NotifyAdmins(string message) => Task.CompletedTask;
 }
