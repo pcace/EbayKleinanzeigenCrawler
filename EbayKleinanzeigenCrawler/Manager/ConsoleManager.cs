@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using EbayKleinanzeigenCrawler.Interfaces;
@@ -41,7 +41,7 @@ public class ConsoleManager : StatefulManagerBase
         });
     }
 
-    protected override Task SendMessage(Subscriber subscriber, string message, bool enablePreview = true)
+    protected override Task SendMessage(Subscriber subscriber, string message, bool enablePreview = true, object? replyMarkup = null)
     {
         Console.ForegroundColor = ConsoleColor.Yellow;
         Console.Out.WriteLine(message);

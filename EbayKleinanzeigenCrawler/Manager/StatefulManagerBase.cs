@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Threading.Tasks;
 using EbayKleinanzeigenCrawler.Interfaces;
@@ -10,19 +10,86 @@ namespace EbayKleinanzeigenCrawler.Manager;
 public abstract class StatefulManagerBase : IOutgoingNotifications
 {
     protected readonly ILogger Logger;
-    private readonly ISubscriptionPersistence _subscriptionPersistence;
+    protected readonly ISubscriptionPersistence SubscriptionPersistence;
     private readonly IParserProvider _parserProvider;
 
     protected StatefulManagerBase(ILogger logger, ISubscriptionPersistence subscriptionManager, IParserProvider parserProvider)
     {
         Logger = logger;
-        _subscriptionPersistence = subscriptionManager;
+        SubscriptionPersistence = subscriptionManager;
         _parserProvider = parserProvider;
     }
 
-    protected abstract Task SendMessage(Subscriber subscriber, string message, bool enablePreview = true);
+    protected abstract Task SendMessage(Subscriber subscriber, string message, bool enablePreview = true, object? replyMarkup = null);
+
+    /// <summary>
+    /// Override in TelegramManager to provide an InlineKeyboardMarkup with "⏭️ Skip" button.
+    /// </summary>
+    protected virtual object? GetSkipKeyboard() => null;
+
+    /// <summary>
+    /// Override in TelegramManager to provide an InlineKeyboardMarkup with "✅ Yes" / "❌ No" buttons.
+    /// </summary>
+    protected virtual object? GetYesNoKeyboard() => null;
+
+    /// <summary>
+    /// Override in TelegramManager to provide an InlineKeyboardMarkup with main command buttons.
+    /// </summary>
+    protected virtual object? GetMainMenuKeyboard() => null;
 
     protected abstract Task DisplaySubscriptionList(Subscriber subscriber);
+
+    /// <summary>
+    /// Deletes a subscription by its ID. Handles confirmation and persistence.
+    /// </summary>
+    protected async Task DeleteSubscriptionById(Subscriber subscriber, Guid subscriptionId)
+    {
+        var sub = subscriber.Subscriptions.FirstOrDefault(s => s.Id == subscriptionId);
+        if (sub is null)
+        {
+            await SendMessage(subscriber, "Subscription not found.", replyMarkup: GetMainMenuKeyboard());
+            return;
+        }
+
+        subscriber.Subscriptions.Remove(sub);
+        subscriber.State = InputState.Idle;
+        SubscriptionPersistence.SaveData();
+        await SendMessage(subscriber, $"🗑️ Deleted subscription *{sub.Title}*", replyMarkup: GetMainMenuKeyboard());
+    }
+
+    /// <summary>
+    /// Toggles a subscription between enabled and disabled by its ID.
+    /// </summary>
+    protected async Task ToggleSubscriptionById(Subscriber subscriber, Guid subscriptionId)
+    {
+        var sub = subscriber.Subscriptions.FirstOrDefault(s => s.Id == subscriptionId);
+        if (sub is null)
+        {
+            await SendMessage(subscriber, "Subscription not found.", replyMarkup: GetMainMenuKeyboard());
+            return;
+        }
+
+        sub.Enabled = !sub.Enabled;
+        SubscriptionPersistence.SaveData();
+        var status = sub.Enabled ? "✅ Enabled" : "🔇 Disabled";
+        await SendMessage(subscriber, $"{status}: *{sub.Title}*", replyMarkup: GetMainMenuKeyboard());
+    }
+
+    /// <summary>
+    /// Starts the edit flow for a subscription by its ID.
+    /// </summary>
+    protected async Task EditSubscriptionById(Subscriber subscriber, Guid subscriptionId)
+    {
+        var sub = subscriber.Subscriptions.FirstOrDefault(s => s.Id == subscriptionId);
+        if (sub is null)
+        {
+            await SendMessage(subscriber, "Subscription not found.", replyMarkup: GetMainMenuKeyboard());
+            return;
+        }
+
+        await SendMessage(subscriber, "You can edit include keywords and exclude keywords now.");
+        await StartInputIncudeKeywords(subscriber, sub);
+    }
 
     protected async Task ProcessCommand(string clientId, string message)
     {
@@ -31,16 +98,16 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
         Subscriber subscriber = null;
         try
         {
-            var subscribers = _subscriptionPersistence.GetSubscribers();
+            var subscribers = SubscriptionPersistence.GetSubscribers();
             subscriber = subscribers.SingleOrDefault(s => s.Id.Equals(clientId));
             if (subscriber is null)
             {
                 subscriber = new Subscriber 
                 {
                     Id = clientId,
-                    IsAdmin = false  // admin propery has to be set manually in Subscribers.json
+                    IsAdmin = false
                 };
-                _subscriptionPersistence.AddSubscriber(subscriber);
+                SubscriptionPersistence.AddSubscriber(subscriber);
             }
 
             await HandleState(subscriber, message);
@@ -60,7 +127,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
 
     public async Task NotifySubscribers(Subscription subscription, Result newResult)
     {
-        var subscribers = _subscriptionPersistence.GetSubscribers()
+        var subscribers = SubscriptionPersistence.GetSubscribers()
             .Where(s => s.Subscriptions.Select(s => s.Id).Any(s => s.Equals(subscription.Id)))
             .ToList();
 
@@ -82,7 +149,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
 
     public async Task NotifyAdmins(string message)
     {
-        var admins = _subscriptionPersistence
+        var admins = SubscriptionPersistence
             .GetSubscribers()
             .Where(s => s.IsAdmin);
 
@@ -118,7 +185,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
             }
             case InputState.Idle when messageText == "/reload":
             {
-                await ReloadSubscriberFile(subscriber); // TODO: restrict to admins only
+                await ReloadSubscriberFile(subscriber);
                 return;
             }
             case InputState.Idle when messageText == "/deleteall":
@@ -126,7 +193,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
                 await DeleteAllSubscriptions(subscriber);
                 return;
             }
-            case InputState.Idle when messageText == "/delete":  // TODO: add edit mode
+            case InputState.Idle when messageText == "/delete":
             {
                 await StartDeletingSubscription(subscriber);
                 return;
@@ -197,14 +264,14 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
 
     private async Task DisplayHelloMessage(Subscriber subscriber)
     {
-        await SendMessage(subscriber, "Welcome :-) Write /help for available commands");
+        await SendMessage(subscriber, "Welcome :-) Select a command below:", replyMarkup: GetMainMenuKeyboard());
         subscriber.State = InputState.Idle;
     }
         
     private async Task DeleteAllSubscriptions(Subscriber subscriber)
     {
         subscriber.Subscriptions.Clear();
-        _subscriptionPersistence.SaveData();
+        SubscriptionPersistence.SaveData();
         await SendMessage(subscriber, "All your subscriptions were deleted");
     }
 
@@ -227,7 +294,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
 
         subscriber.Subscriptions.Remove(subscriptionToDelete);
         subscriber.State = InputState.Idle;
-        _subscriptionPersistence.SaveData();
+        SubscriptionPersistence.SaveData();
         await SendMessage(subscriber, $"Deleted subscription {subscriptionToDelete.Title}");
     }
 
@@ -273,7 +340,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
         }
 
         subscriber.State = InputState.Idle;
-        _subscriptionPersistence.SaveData();
+        SubscriptionPersistence.SaveData();
         await SendMessage(subscriber, resultMessage);
     }
 
@@ -286,7 +353,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
                                "Write /list to view your current subscriptions \n" +
                                "Write /disable or /enable to disable or enable a subscription \n" +
                                "At any time, you can write /cancel";
-        await SendMessage(subscriber, message);
+        await SendMessage(subscriber, message, replyMarkup: GetMainMenuKeyboard());
     }
 
     private async Task ReloadSubscriberFile(Subscriber subscriber)
@@ -296,20 +363,19 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
             await SendMessage(subscriber, "Only admins can perform this action");
             return;
         }
-        var restored = _subscriptionPersistence.RestoreData();
+        var restored = SubscriptionPersistence.RestoreData();
         await SendMessage(subscriber, restored ? "Subscriber list restored" : "Failed to restore subscriber list");
     }
 
     private async Task StartAddingSubscription(Subscriber subscriber)
     {
         await SendMessage(subscriber, "Paste the URL of a search page. The URL must contain all search parameters. Use most exact search filters and avoid too many results.");
-        await SendMessage(subscriber, "Currently, no mobile URLs are supported, please copy the URL from a Desktop browser.'"); // TODO: Verify URL instead
+        await SendMessage(subscriber, "Currently, no mobile URLs are supported, please copy the URL from a Desktop browser.'");
         subscriber.State = InputState.WaitingForUrl;
     }
 
     private async Task AnalyzeInputUrl(string messageText, Subscriber subscriber)
     {
-        // TODO: Create proper URL validation in Parser class and call it from here
         if (!messageText.StartsWith("https://www."))
         {
             await SendMessage(subscriber, "Please enter a valid URL only");
@@ -324,7 +390,6 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
 
         var subscription = new Subscription { QueryUrl = url };
 
-        // GetParser() throws an Exception if no parser is found
         var parser = _parserProvider.GetParser(subscription);
         if (parser is null)
         {
@@ -355,14 +420,14 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
         await StartInputIncudeKeywords(subscriber, subscriptionToEdit);
     }
 
-    private async Task StartInputIncudeKeywords(Subscriber subscriber, Subscription subscription)
+    protected async Task StartInputIncudeKeywords(Subscriber subscriber, Subscription subscription)
     {
         if (subscription.IncludeKeywords is not null && subscription.IncludeKeywords.Any())
         {
             await SendMessage(subscriber, "Current keywords to include are:");
             await SendMessage(subscriber, string.Join(", ", subscription.IncludeKeywords));
         }
-        await SendMessage(subscriber, "Enter keywords which must all be included in title or description. Separate by \",\" and define alternatives by \"|\". Or write '/skip'");
+        await SendMessage(subscriber, "Enter keywords which must all be included in title or description. Separate by \",\" and define alternatives by \"|\". Or press the Skip button.", replyMarkup: GetSkipKeyboard());
         await SendMessage(subscriber, "Example: 'one, two|three' will find results where 'one' and 'two' are words in the description; but it will also find results with 'one' and 'three'.");
         subscriber.IncompleteSubscription = subscription;
         subscriber.State = InputState.WaitingForIncludeKeywords;
@@ -379,7 +444,6 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
 
         if (messageText.Trim() == "/skip")
         { 
-            // When in Edit mode and skipping, keep existing keywords
             var existingIncludeKeywords = subscriber.IncompleteSubscription.IncludeKeywords;
             if (existingIncludeKeywords is not null && existingIncludeKeywords.Any())
             {
@@ -399,7 +463,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
             await SendMessage(subscriber, "Current keywords to exclude are:");
             await SendMessage(subscriber, string.Join(", ", subscription.ExcludeKeywords));
         }
-        await SendMessage(subscriber, "Enter keywords which must not appear in title or description, separated by \",\" or write '/skip'");
+        await SendMessage(subscriber, "Enter keywords which must not appear in title or description, separated by \",\" or press the Skip button.", replyMarkup: GetSkipKeyboard());
         await SendMessage(subscriber, "Hint: If any of these keywords is found in title or description, there will be no notification.");
         subscriber.State = InputState.WaitingForExcludeKeywords;
     }
@@ -415,7 +479,6 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
 
         if (messageText.Trim() == "/skip")
         {
-            // When in Edit mode and skipping, keep existing keywords
             var existingExcludeKeywords = subscriber.IncompleteSubscription.ExcludeKeywords;
             if (existingExcludeKeywords is not null && existingExcludeKeywords.Any())
             {
@@ -429,20 +492,18 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
         {
             subscriber.IncompleteSubscription.ExcludeKeywords = excludeKeywords;
 
-            // Remove the old subscription, which is currently edited
             subscriber.Subscriptions = subscriber.Subscriptions
                 .Where(s => s.Id != subscriber.IncompleteSubscription.Id)
                 .ToList();
             
-            // Move the edited subscription to the final list and save
             PersistIncompleteSubscription(subscriber);
-            await SendMessage(subscriber, "Finished editing!");
+            await SendMessage(subscriber, "Finished editing!", replyMarkup: GetMainMenuKeyboard());
         }
         else
         {
             subscriber.IncompleteSubscription.ExcludeKeywords = excludeKeywords;
             subscriber.State = InputState.WaitingForInitialPull;
-            await SendMessage(subscriber, "Do you want to receive all existing matches initially? (yes/no)");
+            await SendMessage(subscriber, "Do you want to receive all existing matches initially?", replyMarkup: GetYesNoKeyboard());
         }
     }
 
@@ -478,7 +539,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
     {
         var id = PersistIncompleteSubscription(subscriber);
         Logger.Information($"Added subscription {id}");
-        await SendMessage(subscriber, $"That's it. Added a new subscription for you. You now have {subscriber.Subscriptions.Count} subscriptions.");
+        await SendMessage(subscriber, $"That's it. Added a new subscription for you. You now have {subscriber.Subscriptions.Count} subscriptions.", replyMarkup: GetMainMenuKeyboard());
         await SendMessage(subscriber, "Initially it can take a while until all matches are found. I can only do 40 queries every 5 minutes :-)");
     }
 
@@ -489,7 +550,7 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
         subscriber.Subscriptions.Add(subscriber.IncompleteSubscription);
         subscriber.IncompleteSubscription = null;
         subscriber.State = InputState.Idle;
-        _subscriptionPersistence.SaveData();
+        SubscriptionPersistence.SaveData();
         return id;
     }
 
@@ -497,12 +558,12 @@ public abstract class StatefulManagerBase : IOutgoingNotifications
     {
         subscriber.State = InputState.Idle;
         subscriber.IncompleteSubscription = null;
-        _subscriptionPersistence.SaveData();
-        await SendMessage(subscriber, "Cancelled the operation");
+        SubscriptionPersistence.SaveData();
+        await SendMessage(subscriber, "Cancelled the operation", replyMarkup: GetMainMenuKeyboard());
     }
 
     private async Task DisplayDontUnderstand(Subscriber subscriber)
     {
-        await SendMessage(subscriber, "I don't understand. Write /help for instructions.");
+        await SendMessage(subscriber, "I don't understand. Write /help for instructions.", replyMarkup: GetMainMenuKeyboard());
     }
 }
