@@ -46,7 +46,7 @@ public class QueryExecutor : IQueryExecutor
     {
         _logger.Information($"Loading URL: {url}");
 
-        try 
+        try
         {
             // Allow retrying once after a 429/Retry-After response was found to avoid temporarily skipping an link
             var firstTry = await TryHttpRequest(url);
