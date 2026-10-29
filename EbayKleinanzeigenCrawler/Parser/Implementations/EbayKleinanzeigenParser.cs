@@ -62,55 +62,65 @@ public class EbayKleinanzeigenParser : ParserBase
 
     public override List<Uri> GetAdditionalPages(HtmlDocument document)
     {
-        var additionalPages = document.DocumentNode.Descendants("a")
-            .Where(dx => dx.Attributes.Any(ab => ab.Name == "class" && ab.Value == "pagination-page"))
-            .SelectMany(d => d.Attributes.Where(a => a.Name == "href"))
-            .Select(d => d.Value)
-            .Where(l => !string.IsNullOrEmpty(l))
-            .Select(l => new Uri($"{BaseUrl}{l}"))
+        return document.DocumentNode.Descendants("a")
+            .Where(a => HasClass(a, "pagination-page") ||
+                        a.GetAttributeValue("href", "").Contains("/seite:"))
+            .Select(a => ResolveLink(a.GetAttributeValue("href", "")))
+            .Where(uri => uri is not null)
+            .Distinct()
             .ToList();
-        return additionalPages;
     }
 
     protected override List<HtmlNode> ParseResults(HtmlDocument resultPage)
     {
-        return resultPage.DocumentNode
-            .SelectNodes("//ul[@id='srchrslt-adtable']")?
+        // The Astro search page uses data-adid/data-href instead of aditem.
+        // Keep the old markup working for pages that have not migrated yet.
+        return resultPage.GetElementbyId("srchrslt-adtable")?
             .Descendants("article")
-            .Where(div => div.GetAttributeValue("class", "").Contains("aditem"))
-            .ToList();
+            .Where(article => article.Attributes["data-adid"] is not null || HasClass(article, "aditem"))
+            .ToList() ?? new List<HtmlNode>();
     }
 
     protected override Uri ParseResultLink(HtmlNode result)
     {
-        var link = result
-            .SelectNodes("div[@class='aditem-image']//a")?
-            .Select(n => n.Attributes.SingleOrDefault(a => a.Name == "href"))
-            .Where(l => l is not null)
-            .Select(l => new Uri($"{BaseUrl}{l.Value}"))
-            .SingleOrDefault();
+        var cardLink = ResolveLink(result.GetAttributeValue("data-href", ""));
+        if (cardLink?.AbsolutePath.StartsWith("/s-anzeige/") == true)
+        {
+            return cardLink;
+        }
 
-        return link;
+        return result.Descendants("a")
+            .Select(a => ResolveLink(a.GetAttributeValue("href", "")))
+            .FirstOrDefault(uri => uri?.AbsolutePath.StartsWith("/s-anzeige/") == true);
     }
 
     protected override string ParseResultDate(HtmlNode result)
     {
-        var date = result
-            .SelectNodes("div/div/div[@class='aditem-main--top--right']")?
-            .Select(d => d.InnerText)
-            .SingleOrDefault()?
-            .Trim();
-        return date;
+        var legacy = result.Descendants("div").FirstOrDefault(n => HasClass(n, "aditem-main--top--right"));
+        var calendar = result.Descendants("svg")
+            .FirstOrDefault(n => n.GetAttributeValue("data-title", "") == "calendarOutline");
+        var current = calendar?.ParentNode.ChildNodes.FirstOrDefault(n => n.Name == "span");
+        return Text(legacy ?? current);
     }
 
     protected override string ParseResultPrice(HtmlNode result)
     {
-        var price = result
-            .SelectNodes("div/div/div/p[@class='aditem-main--middle--price-shipping--price']")?
-            .Select(d => d.InnerText)
-            .SingleOrDefault()?
-            .Trim();
-        return price;
+        var price = result.Descendants("p").FirstOrDefault(n =>
+            HasClass(n, "aditem-main--middle--price-shipping--price") ||
+            (HasClass(n, "text-title3") && HasClass(n, "font-strong") && !HasClass(n, "line-through")));
+        return Text(price);
+    }
+
+    private static bool HasClass(HtmlNode node, string value) =>
+        node.GetAttributeValue("class", "").Split((char[])null, StringSplitOptions.RemoveEmptyEntries).Contains(value);
+
+    private static string Text(HtmlNode node) => node is null ? null : HtmlEntity.DeEntitize(node.InnerText).Trim();
+
+    private static Uri ResolveLink(string href)
+    {
+        if (string.IsNullOrWhiteSpace(href)) return null;
+        return Uri.TryCreate(new Uri(BaseUrl), HtmlEntity.DeEntitize(href), out var uri) &&
+               uri.Scheme == Uri.UriSchemeHttps && uri.Host == new Uri(BaseUrl).Host ? uri : null;
     }
 
     protected override string ParseTitle(HtmlDocument document)
